@@ -1,196 +1,201 @@
-import java.util.ArrayList;
+import java.util.NoSuchElementException;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+import java.util.Optional;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Scanner;
 import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 public class ParserV2 {
     /** Регулярные выражения*/
-    private static Pattern var = Pattern.compile("^[ ]*[a-zA-Z]+");
-    private static Pattern valv2 =  Pattern.compile("^[ ]*((-?\\d+\\.?\\d+)|(\\.)|\\d+)");
-    private static Pattern op = Pattern.compile("^[ ]*([+*/^=\\-])");
-    private static Pattern parenthesis = Pattern.compile("^[ ]*\\(|\\)");
-    /** Абстрактный результат. В поле result.val будут записываться промежуточные вычисления*/
-    private static Result result = new Result();
+    private static Pattern whitespace = Pattern.compile("^\\s+");
+    private static Pattern var = Pattern.compile("^[a-zA-Z]+");
+    private static Pattern kw_var = Pattern.compile("^var");
+    private static Pattern val = Pattern.compile("^\\d+(\\.\\d*)?([eE][+-]?\\d+)?");
+    private static Pattern op = Pattern.compile("^[+*/^=\\-]");
+    private static Pattern parenthesis = Pattern.compile("^[()]");
+    private static String expr;
     /** Таблица символов */
     private static HashMap<String,Double> symtable = new HashMap<>();
+    private static Token currentToken;
+    private static int pos = 0;
 
-    public static void main(String[] args) throws Exception {
-        StringBuilder expression = new StringBuilder(new Scanner(System.in).nextLine());
-        List<Token> tokens = new ArrayList<>();
-        while(!expression.toString().isEmpty()) {
-            tokens.add(getNextToken(expression));
+    public static void main(String[] args) {
+        Scanner s = new Scanner(System.in);
+        while(true) {
+          try {
+            double result = parseS(s.nextLine());
+            System.out.println("Выражение = " + result);
+          } catch (NoSuchElementException e) {
+            break;
+          } catch (Exception e) {
+            System.err.println(e.getMessage());
+          }
         }
-        while(tokens.size() > 1)
-            lexer(tokens);
-        if(result.getVar()!=null) {
-            System.out.println("Переменная "+ result.getVar() + " = " + result.getVal());
-        }else{
-            System.out.println("Выражение = " + result.getVal());
-        }
-
+        s.close();
     }
 
     /**Получить следующий токен*/
-    private static Token getNextToken(StringBuilder expr) throws Exception {
-        int pos = 0;
-        while(!expr.substring(pos).isEmpty()) {
-            while (expr.charAt(pos) == ' ')
-                pos++;
-            if (pos < expr.length() && var.matcher(expr).find()) { return  getTokenForType(Type.VAR,var,pos,expr);
-            } else if (pos < expr.length() && valv2.matcher(expr).find()) { return getTokenForType(Type.VAL,valv2,pos,expr);
-            } else if (pos < expr.length() && op.matcher(expr).find()) { return getTokenForType(Type.OP,op,pos,expr);
-            } else if (pos < expr.length() && parenthesis.matcher(expr).find()){ return getTokenForType(Type.PARENT, parenthesis,pos,expr);
-            }
+    private static Token getNextToken() throws Exception {
+        if(expr.substring(pos).isEmpty()) {
+          return new Token(Type.EOF, "");
         }
-        throw new Exception("Символ не распознан / строка пустая");
+
+        String ss = expr.substring(pos);
+        Matcher m = whitespace.matcher(ss);
+
+        // Пропустить пробельные символы в начале подстроки
+        if (m.find()) {
+          pos += m.group().length();
+        }
+
+        String ss2 = expr.substring(pos);
+        // Сравнить подстроку с шаблонами лексем:
+        Token res =
+          Stream.<Supplier<Optional<Token>>>of(
+          () -> matchToken(ss2, kw_var, Type.KW_VAR),
+          () -> matchToken(ss2, var, Type.VAR),
+          () -> matchToken(ss2, val, Type.VAL),
+          () -> matchToken(ss2, op,  Type.OP ),
+          () -> matchToken(ss2, parenthesis, Type.PARENT)
+          )
+          .map(Supplier::get)
+          .filter(Optional::isPresent)
+          .map(Optional::get)
+          .findFirst()
+          .orElseThrow(() -> new Exception("Неизвестный токен: " + expr.substring(pos)))
+          ;
+        return res;
     }
 
-    /** Искать конец лексемы в строке. Вернуть найденный токен*/
-    private static Token getTokenForType(Type type, Pattern pattern, int pos, StringBuilder str){
-        String token ="";
-        while(pos < str.length() && pattern.matcher(String.valueOf(str.charAt(pos))).find()){
-            token = token + str.charAt(pos);
-            pos++;
-        }
-        str.delete(0,pos);
-        return new Token(type, token.trim());
-    }
-    /** Разбор токенов (выделено в отдельный метод, чтобы можно было вызывать рекурсивно)*/
-    private static void lexer(List<Token> tokens){
-        for(int i = 0; i < tokens.size(); i++){
-            i = caseImitator(tokens,i);
-        }
+    private static Optional<Token> matchToken(String s, Pattern pat, Type type) {
+      Matcher m = pat.matcher(s);
+      if (m.find()) {
+        pos += m.group().length();
+        return Optional.of(new Token(type, m.group()));
+      }
+      else {
+        return Optional.empty();
+      }
     }
 
-    /** Удалить токены, которые уже вычислены*/
-    private static int clearTokens(List<Token> tokens, int i, Result result){
-        tokens.get(i-1).c = result.getVal().toString();
-        tokens.remove(i+1);
-        tokens.remove(i);
-        return i - 2;
-    }
-    /** Удалить скобки после вычисления результата в них*/
-    private static int clearTokensForParent(List<Token> tokens, int i, Result result){
-        tokens.get(i).c = result.getVal().toString();
-        tokens.remove(i-2);
-        tokens.remove(i-1);
-        return 0;
-    }
+    /*
+    Грамматика. Стартовый символ -- S.
+    Токены: операторы + - * / ^; скобки ( ) ; Var для идентификаторов переменных
+    Val для значений, ключевое слово var, конец строки EOF.
+    S  -> H EOF
+    H  -> E | var Var = E
+    E  -> T E'
+    E' -> + T E' | - T E' | ε
+    T  -> F T'
+    T' -> * F T' | / F T' | ε
+    F  -> V F'
+    F' -> ^ F | ε
+    V  -> V | - V
+    V'  -> Var | Val | ( E )
+    */
+
     /** Разбирает токены и выполняет действия с ними */
-    private static int caseImitator(List<Token> tokens, int i){
-        Token token  = tokens.get(i);
-        switch (token.t) {
-            case OP:
-                if (token.c.equals("+")){
-                    if(i + 2  == tokens.size() ||(i + 2 < tokens.size() && !isMulDiv(tokens.get(i + 2)) && !isExp(tokens.get(i + 2)))){
-                        result.setVal(doAdd(Double.parseDouble(tokens.get(i-1).c),Double.parseDouble(tokens.get(i+1).c)));
-                        i =clearTokens(tokens,i,result);
-                    }else{
-                        i = getValueForHighPriority(tokens,i);
-                    }
-                } else if (token.c.equals("-")){
-                    if(i + 2 < tokens.size() && !isMulDiv(tokens.get(i + 2)) && !isExp(tokens.get(i + 2))) {
-                        result.setVal(doSub(Double.parseDouble(tokens.get(i - 1).c), Double.parseDouble(tokens.get(i + 1).c)));
-                        i =clearTokens(tokens,i,result);
-                    }else{
-                        i = getValueForHighPriority(tokens,i);
-                    }
-                } else if (token.c.equals("*")){
-                    result.setVal(doMul(Double.parseDouble(tokens.get(i-1).c),Double.parseDouble(tokens.get(i+1).c)));
-                    i =clearTokens(tokens,i,result);
-                } else if (token.c.equals("/")){
-                    result.setVal(doDiv(Double.parseDouble(tokens.get(i-1).c),Double.parseDouble(tokens.get(i+1).c)));
-                    i =clearTokens(tokens,i,result);
-                } else if (token.c.equals("^")){
-                    result.setVal(doExp(Double.parseDouble(tokens.get(i-1).c),Double.parseDouble(tokens.get(i+1).c)));
-                    i =clearTokens(tokens,i,result);
-                }
-                break;
-            case VAL:
-                if (result.getVal() == null) {
-                    result.setVal(Double.parseDouble(token.c));
-                }
-                break;
-            case VAR:
-                if((i+2 < tokens.size() && tokens.get(i+1).c.equals("=") && valv2.matcher(tokens.get(i+2).c).find()) // это является просто присваиванием х = 1
-                        || (i+3 < tokens.size() && !op.matcher(tokens.get(i+3).c).find() // после 1 нет никаких операторов
-                            && !parenthesis.matcher(tokens.get(i+2).c).find()) ) { // после 1 нет никаких скобок
-                    symtable.put(token.c, Double.parseDouble(tokens.get(i + 2).c));
-                    tokens.remove(i);
-                    tokens.remove(i);
-                    result.setVar(token.c);
-                }
-                break;
-            case PARENT:
-                if(token.c.equals("("))
-                    i =caseImitator(tokens,++i);
-                else if(token.c.equals(")")){
-                    i =clearTokensForParent(tokens,i,result);
-                }
-                break;
-        }
-        return i;
+
+    private static double parseS(String in_expr) throws Exception {
+      pos = 0;
+      expr = in_expr;
+      currentToken = getNextToken();
+
+      double res = parseH();
+      if (!currentToken.t.equals(Type.EOF)) throw new Exception("Expected EOF, got " + currentToken.c);
+      return res;
     }
 
-    /** Посчитать значение всех возможных операций высшего приоритета до нормального числа, записать его в токен, вернуть позиция оператора - 1
-     * pos - номер оператора (+,-)*/
-    private static int getValueForHighPriority(List<Token> tokens, int pos){
-        int i = pos;
-        while(pos+2 < tokens.size() && isExp(tokens.get(pos +=2 ))){
-            tokens.get(pos-1).c = doExp(Double.parseDouble(tokens.get(pos-1).c), Double.parseDouble(tokens.get(pos+1).c)).toString();
-            tokens.remove(pos+1);
-            tokens.remove(pos);
-        }
-        pos = i;
-        while(pos+2 < tokens.size() && isMulDiv(tokens.get(pos+=2))){
-            tokens.get(pos-1).c = doForOp(tokens.get(pos),Double.parseDouble(tokens.get(pos-1).c),Double.parseDouble(tokens.get(pos+1).c)).toString();
-            tokens.remove(pos+1);
-            tokens.remove(pos);
-        }
-        return i-1;
-
+    private static double parseH() throws Exception {
+      if (currentToken.t.equals(Type.KW_VAR)) {
+        currentToken = getNextToken();
+        if (!currentToken.t.equals(Type.VAR)) throw new Exception("Expected VAR, got " + currentToken.t.toString());
+        String varName = currentToken.c;
+        currentToken = getNextToken();
+        if (!currentToken.t.equals(Type.OP) || !currentToken.c.equals("=")) throw new Exception("Expected =, got " + currentToken.c);
+        currentToken = getNextToken();
+        double res = parseE();
+        symtable.put(varName, res);
+        return res;
+      } else {
+        return parseE();
+      }
     }
 
-    private static Double doAdd(Double op1, Double op2){
-        return op1 + op2;
+    private static double parseE() throws Exception {
+      return parseEprime(parseT());
     }
-    private static Double doSub(Double op1, Double op2){
-        return op1 - op2;
+
+    private static double parseT() throws Exception {
+      return parseTprime(parseF());
     }
-    private static Double doMul(Double op1, Double op2){
-        return op1 * op2;
+
+    private static double parseF() throws Exception {
+      return parseFprime(parseV());
     }
-    private static Double doDiv(Double op1, Double op2){
-        return op1 / op2;
+
+    private static double parseV() throws Exception {
+      if (currentToken.c.equals("-")) {
+        currentToken = getNextToken();
+        return - parseVprime();
+      } else {
+        return parseVprime();
+      }
     }
-    private static Double doExp(Double op1, Double op2){
-        return Math.pow(op1, op2);
+
+    private static double parseVprime() throws Exception {
+      if (currentToken.c.equals("(")) {
+        currentToken = getNextToken();
+        double res = parseE();
+        if (!currentToken.c.equals(")")) throw new Exception("Expected ), got " + currentToken.c);
+        currentToken = getNextToken();
+        return res;
+      } else if (currentToken.t.equals(Type.VAR)) {
+        double res = symtable.get(currentToken.c);
+        currentToken = getNextToken();
+        return res;
+      } else if (currentToken.t.equals(Type.VAL)) {
+        double res = Double.parseDouble(currentToken.c);
+        currentToken = getNextToken();
+        return res;
+      } else {
+        throw new Exception("Expected VAR, VAL or (, but got " + currentToken.c);
+      }
     }
-    /** Если оператор * или / */
-    private static boolean isMulDiv(Token token){
-        if(token.c.equals("*") || token.c.equals("/")){
-            return true;
-        }
-        return false;
+
+    private static double parseTprime(double lhs) throws Exception {
+      if (currentToken.t.equals(Type.OP) && currentToken.c.equals("*")) {
+        currentToken = getNextToken();
+        return parseTprime(lhs * parseF());
+      } else if (currentToken.t.equals(Type.OP) && currentToken.c.equals("/")) {
+        currentToken = getNextToken();
+        return parseTprime(lhs / parseF());
+      } else {
+        return lhs;
+      }
     }
-    /** Если оператор  ^ */
-    private static boolean isExp(Token token){
-        if(token.c.equals("^")){
-            return true;
-        }
-        return false;
+
+    private static double parseEprime(double lhs) throws Exception {
+      if (currentToken.t.equals(Type.OP) && currentToken.c.equals("+")) {
+        currentToken = getNextToken();
+        return parseEprime(lhs + parseT());
+      } else if (currentToken.t.equals(Type.OP) && currentToken.c.equals("-")) {
+        currentToken = getNextToken();
+        return parseEprime(lhs - parseT());
+      } else {
+        return lhs;
+      }
     }
-    /** Сделать действие в зависимости от оператора*/
-    private static Double doForOp (Token token, Double op1, Double op2){
-        if(token.c.equals("*")){
-            return doMul(op1,op2);
-        } else if(token.c.equals("/")){
-            return doDiv(op1,op2);
-        }else if(token.c.equals("^")){
-            return doExp(op1,op2);
-        }
-        return null;
+
+    private static double parseFprime(double lhs) throws Exception {
+      if (currentToken.t.equals(Type.OP) && currentToken.c.equals("^")) {
+        currentToken = getNextToken();
+        return Math.pow(lhs, parseF());
+      } else {
+        return lhs;
+      }
     }
 
     /** Тип токена
@@ -200,7 +205,7 @@ public class ParserV2 {
      * Скобки
      */
     public enum Type {
-        VAR,VAL,OP,PARENT
+        VAR, VAL, OP, PARENT, KW_VAR, EOF
     }
     public static class Token {
         public Type t;
